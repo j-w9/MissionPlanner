@@ -22,7 +22,7 @@ namespace Xamarin.MacOS
     {
         public AppDelegate()
         {
-            var style = NSWindowStyle.Closable | NSWindowStyle.Resizable | NSWindowStyle.Titled;
+            var style = NSWindowStyle.Closable | NSWindowStyle.Miniaturizable | NSWindowStyle.Resizable | NSWindowStyle.Titled;
             var rect = new CoreGraphics.CGRect(200,200,1024,768);
             mainWindow = new NSWindow(rect, style, NSBackingStore.Buffered, false);
             mainWindow.Title = "Mission Planner on Mac!";
@@ -64,8 +64,10 @@ namespace Xamarin.MacOS
 
         private void MainWindow_DidResize(object sender, EventArgs e)
         {
-            Console.WriteLine("MainWindow_DidResize " + mainWindow.Frame.Size);
-            WinForms.Resize((int)mainWindow.Frame.Size.Width, (int)mainWindow.Frame.Size.Height);
+            // the area the page is drawn in, which the frame's title bar and toolbar are not part of
+            var size = mainWindow.ContentLayoutRect.Size;
+            Console.WriteLine("MainWindow_DidResize " + size);
+            WinForms.Resize((int)size.Width, (int)size.Height);
         }
 
         private  NSWindow mainWindow;
@@ -123,30 +125,14 @@ namespace Xamarin.MacOS
 
             public async Task<ICommsSerial> GetUSB(DeviceInfo di)
             {
-                var data = GetUSBList();
-
-                var devs = GetDevList().Split(new[] { '\r', '\n' });
-
-                var regex = new Regex(@"-o\s+([\w\s]+@.{4}).*\n.*idProduct""\s+=\s+(.*)\n.*\n.*idVendor""\s+=\s+(.*)");
-
                 Console.WriteLine("Looking for " + di.board);
 
-                foreach (Match match in regex.Matches(data))
+                foreach (var device in GetUsbSerialDevices())
                 {
-                    var name = match.Groups[1].Value;
-                    var loc = name.Split("@").Last();
-                    var pid = int.Parse(match.Groups[2].Value);
-                    var vid = int.Parse(match.Groups[3].Value);
-                    
-                    foreach (var dev in devs)
+                    if (di.board == device.Name)
                     {
-                        Console.WriteLine("usb location {0} == {1} && {2}.Contains({3})", di.board, name, dev.ToLower(),
-                            loc.ToLower());
-                        if (di.board == name && dev.ToLower().Contains(loc.ToLower()))
-                        {
-                            Console.WriteLine("GetUSB: Port: " + dev.TrimEnd());
-                            return new SerialPort(dev.TrimEnd());
-                        }
+                        Console.WriteLine("GetUSB: Port: " + device.Ports[0]);
+                        return new SerialPort(device.Ports[0]);
                     }
                 }
 
@@ -155,57 +141,100 @@ namespace Xamarin.MacOS
 
             async Task<List<DeviceInfo>> IUSBDevices.GetDeviceInfoList()
             {
-                var ans =  new List<DeviceInfo>();
+                var ans = new List<DeviceInfo>();
 
-                var data = GetUSBList();
-
-                var devs = GetDevList().Split(new[] { '\r', '\n' });
-
-                var regex = new Regex(@"-o\s+([\w\s]+@.{4}).*\n.*idProduct""\s+=\s+(.*)\n.*\n.*idVendor""\s+=\s+(.*)");
-
-                foreach (Match match in regex.Matches(data))
+                // only usb devices that have a serial port are returned
+                foreach (var device in GetUsbSerialDevices())
                 {
-                    var name = match.Groups[1].Value;
-                    var loc = name.Split("@").Last();
-                    var pid = int.Parse(match.Groups[2].Value);
-                    var vid = int.Parse(match.Groups[3].Value);
-
-                    var deviceInfo = new DeviceInfo()
+                    ans.Add(new DeviceInfo()
                     {
-                        board = name,
-                        description = name,
-                        hardwareid = String.Format("USB\\VID_{0:X4}&PID_{1:X4}&", vid, pid),
-                        name = name
-                    };
-
-                    foreach (var dev in devs)
-                    {
-                        // only add ports where we find a matching tty dev
-                        if (deviceInfo.board == name && dev.ToLower().Contains(loc.ToLower()))
-                            ans.Add(deviceInfo);
-                    }
+                        board = device.Name,
+                        description = device.Name,
+                        hardwareid = String.Format("USB\\VID_{0:X4}&PID_{1:X4}&", device.Vid, device.Pid),
+                        name = device.Name
+                    });
                 }
 
                 return ans;
             }
 
-            private static string GetDevList()
+            private class UsbSerialDevice
             {
-                var proc = System.Diagnostics.Process.Start("bash",
-                    @"-c ""ls /dev/tty.* > /tmp/dev.list""");
-                proc.WaitForExit();
-
-                var data = File.ReadAllText("/tmp/dev.list");
-                return data;
+                public string Name;
+                public int Vid;
+                public int Pid;
+                public List<string> Ports = new List<string>();
             }
 
-        private static string GetUSBList()
-            {
-                var proc = System.Diagnostics.Process.Start("bash",
-                    @"-c ""ioreg -p IOUSB -w0 -l | grep -E '@|idVendor|idProduct|bcdDevice' > /tmp/usb.list""");
-                proc.WaitForExit();
+            private static readonly Regex DeviceRegex =
+                new Regex(@"\+-o\s+(.+?)@(\w+)\s+<class IOUSBHostDevice");
 
-                var data = File.ReadAllText("/tmp/usb.list");
+            private static readonly Regex PropertyRegex =
+                new Regex(@"""(idVendor|idProduct|IOCalloutDevice)""\s+=\s+""?([^""]+)""?");
+
+            /// <summary>
+            /// The usb devices that have a serial port. The port names come from the device's own entry
+            /// in the IO registry, as a port name cannot be derived from the usb location: it is built
+            /// from the location with its zeros removed, or from the serial number.
+            /// </summary>
+            private static List<UsbSerialDevice> GetUsbSerialDevices()
+            {
+                var ans = new List<UsbSerialDevice>();
+                UsbSerialDevice current = null;
+
+                foreach (var line in GetUSBList().Split(new[] { '\r', '\n' }))
+                {
+                    var device = DeviceRegex.Match(line);
+                    if (device.Success)
+                    {
+                        // a device's properties and ports follow it, up to the next device
+                        var loc = device.Groups[2].Value;
+                        current = new UsbSerialDevice()
+                        {
+                            Name = device.Groups[1].Value + "@" + loc.Substring(0, Math.Min(4, loc.Length))
+                        };
+                        ans.Add(current);
+                        continue;
+                    }
+
+                    if (current == null)
+                        continue;
+
+                    var property = PropertyRegex.Match(line);
+                    if (!property.Success)
+                        continue;
+
+                    var value = property.Groups[2].Value.Trim();
+                    switch (property.Groups[1].Value)
+                    {
+                        case "idVendor":
+                            int.TryParse(value, out current.Vid);
+                            break;
+                        case "idProduct":
+                            int.TryParse(value, out current.Pid);
+                            break;
+                        case "IOCalloutDevice":
+                            if (!current.Ports.Contains(value))
+                                current.Ports.Add(value);
+                            break;
+                    }
+                }
+
+                ans = ans.Where(a => a.Ports.Count > 0).ToList();
+                ans.ForEach(a => a.Ports.Sort(StringComparer.Ordinal));
+                return ans;
+            }
+
+            private static string GetUSBList()
+            {
+                var proc = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("ioreg",
+                    "-r -c IOUSBHostDevice -l -w0")
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false
+                });
+                var data = proc.StandardOutput.ReadToEnd();
+                proc.WaitForExit();
                 return data;
             }
         }
