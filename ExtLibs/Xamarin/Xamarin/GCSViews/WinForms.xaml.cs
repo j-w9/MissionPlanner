@@ -409,6 +409,50 @@ namespace Xamarin.GCSViews
             Marshal.FreeHGlobal(ptr);
             //.SetWindowPos(IntPtr.Zero, 0, 0, width, height);
         }
+
+        /// <summary>
+        /// The mouse moved with no button down, for a platform whose view only reports the mouse while a
+        /// button is held. The position is a fraction of the view's width and height, from its top left.
+        /// </summary>
+        public static void MouseMove(double fx, double fy)
+        {
+            if (Instance == null || !start)
+                return;
+
+            try
+            {
+                XplatUIMine.PaintPending = true;
+                XplatUI.driver.SendMessage(IntPtr.Zero, Msg.WM_MOUSEMOVE, new IntPtr(), ViewPosition(fx, fy));
+            } catch {}
+        }
+
+        /// <summary>
+        /// The mouse wheel turned, for a platform whose view does not report it. The delta is 120 a notch
+        /// and positive away from the user, as WM_MOUSEWHEEL.
+        /// </summary>
+        public static void MouseWheel(double fx, double fy, int delta)
+        {
+            if (Instance == null || !start)
+                return;
+
+            try
+            {
+                var position = ViewPosition(fx, fy);
+
+                XplatUIMine.PaintPending = true;
+                // the wheel goes to the control under the last mouse position
+                XplatUI.driver.SendMessage(IntPtr.Zero, Msg.WM_MOUSEMOVE, new IntPtr(), position);
+                XplatUI.driver.SendMessage(IntPtr.Zero, Msg.WM_MOUSEWHEEL, (IntPtr) (delta << 16), position);
+            } catch {}
+        }
+
+        private static IntPtr ViewPosition(double fx, double fy)
+        {
+            var x = (int) (Math.Max(0, Math.Min(1, fx)) * Instance.size.Width);
+            var y = (int) (Math.Max(0, Math.Min(1, fy)) * Instance.size.Height);
+
+            return (IntPtr) ((y) << 16 | (x));
+        }
         
 
         protected override void OnAppearing()

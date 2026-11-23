@@ -30,6 +30,10 @@ namespace Xamarin.MacOS
             mainWindow.DidResize += MainWindow_DidResize;
             mainWindow.WillClose += MainWindow_WillClose;
             NSEvent.AddLocalMonitorForEventsMatchingMask(NSEventMask.KeyDown, KeyboardEventHandler);
+            // the view only reports the mouse while a button is held, so the rest comes from here
+            mainWindow.AcceptsMouseMovedEvents = true;
+            NSEvent.AddLocalMonitorForEventsMatchingMask(NSEventMask.MouseMoved | NSEventMask.ScrollWheel,
+                MouseEventHandler);
 
             Test.BlueToothDevice = new BTDevice();
             Test.UsbDevices = new USBDevices();
@@ -53,6 +57,71 @@ namespace Xamarin.MacOS
             Console.WriteLine(keyEvent.KeyCode);
 
             return keyEvent;
+        }
+
+        // points of trackpad scrolling that make one notch of a mouse wheel
+        private const double PointsPerNotch = 40;
+
+        private double wheelPoints;
+
+        private NSEvent MouseEventHandler(NSEvent mouseEvent)
+        {
+            try
+            {
+                if (mouseEvent.Window != mainWindow)
+                    return mouseEvent;
+
+                // only over the view the forms are drawn in
+                var content = mainWindow.ContentView;
+                var location = mouseEvent.LocationInWindow;
+                var view = content.HitTest(content.Superview == null
+                    ? location
+                    : content.Superview.ConvertPointFromView(location, null)) as NSOpenGLView;
+                if (view == null || view.Bounds.Width <= 0 || view.Bounds.Height <= 0)
+                    return mouseEvent;
+
+                var point = view.ConvertPointFromView(location, null);
+                var fx = (double) point.X / (double) view.Bounds.Width;
+                // the view's origin is its bottom left
+                var fy = ((double) view.Bounds.Height - (double) point.Y) / (double) view.Bounds.Height;
+
+                if (mouseEvent.Type == NSEventType.MouseMoved)
+                {
+                    WinForms.MouseMove(fx, fy);
+                }
+                else if (mouseEvent.Type == NSEventType.ScrollWheel)
+                {
+                    // the scrolling that carries on after the fingers lift is left out
+                    if (mouseEvent.MomentumPhase != NSEventPhase.None)
+                        return mouseEvent;
+
+                    var delta = (double) mouseEvent.ScrollingDeltaY;
+                    int notches;
+                    if (mouseEvent.HasPreciseScrollingDeltas)
+                    {
+                        // a trackpad scrolls in points
+                        if ((mouseEvent.Phase & NSEventPhase.Began) != 0)
+                            wheelPoints = 0;
+                        wheelPoints += delta;
+                        notches = (int) (wheelPoints / PointsPerNotch);
+                        wheelPoints -= notches * PointsPerNotch;
+                    }
+                    else
+                    {
+                        // a mouse wheel: a notch an event, whatever the acceleration
+                        notches = Math.Sign(delta);
+                    }
+
+                    if (notches != 0)
+                        WinForms.MouseWheel(fx, fy, notches * 120);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine(ex);
+            }
+
+            return mouseEvent;
         }
 
         private void MainWindow_WillClose(object sender, EventArgs e)
